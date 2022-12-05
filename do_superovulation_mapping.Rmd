@@ -1,0 +1,1050 @@
+---
+title: "DO Superovulation Genetic Mapping"
+author: "DMG"
+date: "10/18/2022"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(biomaRt)
+library(broom)
+library(GenomicRanges)
+library(qtl2)
+library(qtl2convert)
+library(tidyverse)
+library(readxl)
+
+
+base_dir    = 'C:/Users/c-dgatti/Documents/projects/superovulation'
+data_dir    = file.path(base_dir, 'data')
+results_dir = file.path(base_dir, 'results', 'qtl2')
+ref_dir     = 'C:/Users/c-dgatti/Documents/data/qtl2'
+
+# CC SNP database.
+cc_snp_file = file.path(ref_dir, 'cc_variants_v3.sqlite')
+gene_file   = file.path(ref_dir, 'mouse_genes_mgi_v8.sqlite')
+snp_fxn  = create_variant_query_func(cc_snp_file)
+gene_fxn = create_gene_query_func(gene_file)
+
+# Load in qtl2 data.
+load(file.path(data_dir, 'superovulation_qtl2.Rdata'))
+covar = data.frame(covar, stringsAsFactors = TRUE)
+covar$gen = factor(covar$gen)
+
+# Load in phenotype metadata.
+meta = read.csv(file.path(data_dir, 'data_mapping_guide.csv'))
+meta = meta[meta$map == TRUE,]
+
+# Load in RNA isolation data.
+rna = read_xlsx(path  = file.path(data_dir,'22-bolcan-filas-003_RNA QC 2_300.xlsx'),
+                sheet = 'Plate 1', range = 'A2:T98') %>% 
+      bind_rows(read_xlsx(path  = file.path(data_dir,'22-bolcan-filas-003_RNA QC 2_300.xlsx'),
+                sheet = 'Plate 2', range = 'A2:T98')) %>% 
+      bind_rows(read_xlsx(path  = file.path(data_dir,'22-bolcan-filas-003_RNA QC 2_300.xlsx'),
+                sheet = 'Plate 3', range = 'A2:T98')) %>% 
+      bind_rows(read_xlsx(path  = file.path(data_dir,'22-bolcan-filas-003_RNA QC 2_300.xlsx'),
+                sheet = 'Plate 4', range = 'A2:T11')) %>% 
+      select(id   = `Customer Sample Name`, 
+             conc = `Nanodrop  (ng/µl)`,
+             mass = `Total Yield (µg)`)
+rna = data.frame(rna)
+rownames(rna) = rna$id
+
+source(file.path(base_dir, 'scripts', 'DO_superovulation', 'mediation.R'))
+
+# Ensembl 102 archive, GRCm38.p6
+mart = useEnsembl(biomart = 'regulation', 
+                  dataset = 'mmusculus_regulatory_feature',
+                  host = "https://nov2020.archive.ensembl.org/")
+
+```
+
+## Introduction
+
+I received phenotype and genotype data for 300 female DO mice. Oocytes were extracted after super-ovulation and were counted and categorized, fertilized with C57BL/6J sperm, and counted and categorized again. The goal of the project is to identify genes which influence the number of oocytes produced, oocyte viability, and the proportion of oocytes which go on to be fertilized.
+
+## Data Wrangling
+
+Most of the data was previously gathered. Here, we need to subset the samples to retain samples which occur in all data sets.
+
+```{r subset_sample}
+common_samples = intersect(rownames(pheno), colnames(norm_expr))
+
+pheno    = pheno[common_samples,]
+pheno_rz = pheno_rz[common_samples,]
+covar    = covar[common_samples,]
+probs    = probs[common_samples,]
+K        = lapply(K, function(z) { z[common_samples, common_samples] })
+rna      = rna[common_samples,]
+
+common_genes = intersect(rownames(norm_expr), rownames(annot))
+norm_expr    = norm_expr[,common_samples]
+```
+
+There are `r nrow(pheno)` mice in the final, intersected data set. 
+
+There are two general covariates that I could use: generation or date of isolation. I regressed each phenotype on generation or date. Generation and date are confounded, so I didn't put them in the same model.
+
+```{r}
+df = data.frame(pheno) %>% 
+       rownames_to_column(var = 'mouse') %>% 
+       left_join(select(covar, mouse, sex, gen, date)) %>% 
+       pivot_longer(cols = Weight:DAY2NumbFrag, names_to = 'phenotype', values_to = 'value') %>% 
+       group_by(phenotype) %>% 
+       nest()
+
+df_gen = df %>% 
+  mutate(mod  = map(data, ~ aov(lm(.x$value ~ .x$gen))),
+         mod_summ = map(mod, tidy)) %>% 
+  select(-data, -mod) %>% 
+  unnest(cols = mod_summ) %>%
+  select(-sumsq, -meansq) %>% 
+  filter(!is.na(statistic)) 
+
+df_date = df %>% 
+  mutate(mod  = map(data, ~ aov(lm(.x$value ~ .x$date))),
+         mod_summ = map(mod, tidy)) %>% 
+  select(-data, -mod) %>% 
+  unnest(cols = mod_summ) %>%
+  select(-sumsq, -meansq) %>% 
+  filter(!is.na(statistic)) 
+
+rm(df)
+
+bind_rows(df_gen, df_date) %>% 
+  mutate(term = str_replace(term, '^\\.x\\$',''),
+         term = str_to_title(term)) %>% 
+  ggplot(aes(term, p.value)) +
+    geom_point() +
+    facet_wrap(~phenotype, nrow = 2)
+```
+
+Generation has a better fit for two phenotypes and date has a better fit for two models. The other phenotypes are largely the same. Date has six levels and so consumes 5 degrees of freedom in the models.
+
+## Heritability
+
+Estimate the heritability of each phenotype. We may have polygenic traits that are heritable, but don't have strong QTL.
+
+```{r est_herit}
+herit = data.frame(phenotype = colnames(pheno),
+                   herit     = 0)
+K_all = calc_kinship(probs, type = 'overall')
+
+for(i in 1:ncol(pheno)) {
+  
+  pheno_name = colnames(pheno)[i]
+  ph = pheno[,pheno_name, drop = FALSE]
+
+  meta_row  = which(meta$column == pheno_name)
+  transform = meta$transform[meta_row]
+
+  if(!is.na(transform)) {
+    if(transform == 'log') {
+      ph[,1] = log(ph[,1])
+    } else if(transform == 'log1p') {
+      ph[,1] = log1p(ph[,1])
+    } else if(transform == 'sqrt') {
+      ph[,1] = sqrt(ph[,1])
+    }
+  } # if(!is.na(transform))
+  
+  covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+  addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+  
+  h = est_herit(pheno = ph, kinship = K_all, addcovar = addcovar)
+  herit$herit[i] = h
+  
+} # for(i)
+
+herit
+```
+
+
+## QTL Results {.tabset}
+
+### Body Weight
+
+Heritability: `r format(herit$herit[herit$phenotype == 'Weight'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r bw_get_pheno}
+pheno_name = 'Weight'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(transform == 'log') {
+  ph[,1] = log(ph[,1])
+} else if(transform == 'log1p') {
+  ph[,1] = log1p(ph[,1])
+} else if(transform == sqrt) {
+  ph[,1] = sqrt(ph[,1])
+}
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r bw_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map rankZ-transformed phenotype.
+
+```{r bw_qtl_rz}
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+```
+
+There are no peaks with sufficiently high LOD scores to pursue.
+
+```{r bw_gwas_rz,fig.width=6}
+gwas = scan1snps(genoprobs = probs, map = map, pheno = ph, kinship = K, addcovar = addcovar,
+                 query_func = snp_fxn, keep_all_snps = FALSE)
+plot_snpasso(gwas$lod, gwas$snpinfo, main = pheno_name)
+```
+
+### Number of Clutches
+
+Heritability: `r format(herit$herit[herit$phenotype == 'NumbClutches'], digits = 2)`
+
+This phenotype is ordinal, with values of 0, 1, or 2. Only `r sum(pheno[,'NumbClutches'] < 2)` out of `r nrow(pheno)` mice have values below 2.
+
+Gather phenotype and covariates.
+
+```{r n_clutch_get_pheno}
+pheno_name = 'NumbClutches'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(!is.na(transform)) {
+  if(transform == 'log') {
+    ph[,1] = log(ph[,1])
+  } else if(transform == 'log1p') {
+    ph[,1] = log1p(ph[,1])
+  } else if(transform == sqrt) {
+    ph[,1] = sqrt(ph[,1])
+  }
+} # if(!is.na(transform))
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r n_clutch_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+What does the Chr 5 peak look like when I zoom in?
+
+```{r n_clutch_qtl_chr5}
+plot(qtl, map, main = pheno_name, chr = '5')
+```
+
+The peak looks spikey. It may be due to the distribution of the phenotype.
+
+Run 10 permutations just to get a sense of whether the observed LOD scores might be significant.
+
+```{r}
+perms = qtl = scan1perm(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar, n_perm = 10)
+hist(perms)
+```
+
+The median LOD across permutations is as higher than 15, so I don't think that these QTL are significant.
+
+Since NumbClutches is a very skewed phenotype, I expect the LOD scores to be skewed as well. 
+
+I'm concerned the the low number of mice with less than two clutches makes this an unreliable phenotype.
+
+### Day 1 Number of 1-cells
+
+Heritability: `r format(herit$herit[herit$phenotype == 'DAY1Numb1cells'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r d1num1cell_get_pheno}
+pheno_name = 'DAY1Numb1cells'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(transform == 'log') {
+  ph[,1] = log(ph[,1])
+} else if(transform == 'log1p') {
+  ph[,1] = log1p(ph[,1])
+} else if(transform == sqrt) {
+  ph[,1] = sqrt(ph[,1])
+}
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r d1num1cell_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+This phenotype has a LOD profile similar to NumbClutches. I'm mapping with total oocytes as a covariate, which should have accounted for this.
+
+Plot the LOD on the chromosomes with LOD over 7.
+
+```{r d1num1cell_plot_chr}
+plot(qtl, map, main = pheno_name, chr = c(2, 5, 19))
+```
+
+The peaks look spikey.
+
+Plot the phenotype by genotype plot for the Chr 5 locus and see if any one founder seems to be associated with the phenotype. I'm looking for one founder to be homozygous for the lowest values and possibly some of the same founder's hets to be low as well. If there are random genotypes associated with the low values, then I'm not confident that this is a real genetic signal.
+
+```{r day1num1cell}
+chr = '5'
+peaks = find_peaks(qtl, map, threshold = 8)
+peaks = peaks[peaks$chr == chr,]
+
+mkr = find_marker(map, chr = chr, pos = peaks$pos[1])
+
+# Read in 36 state genoprobs and fix sample names.
+pr36 = readRDS(file.path(data_dir, 'bolcun-filas1__GigaMUGA_genoprobs_36state.rds'))
+for(i in seq_along(pr36)) {
+  rownames(pr36[[i]]) = gsub('^Jackson_Lab_Filas_MURGIGV01_20220929_|(_T)?_[A-H][0-9]+$', '', rownames(pr36[[i]]))
+  rownames(pr36[[i]]) = gsub('^DO_QTL_T ', 'SO', rownames(pr36[[i]]))
+  rownames(pr36[[i]]) = sub('SO', 'SODO', rownames(pr36[[i]]))
+  
+} # for(i)
+
+# Get maximum marginal genotype at Chr 5 marker.
+gt  = maxmarg(probs = pr36[,chr], minprob = 0.01)
+gt  = gt[[1]][rownames(ph), mkr]
+gt = setNames(colnames(pr36[[1]])[gt], names(gt))
+
+plot_pxg(geno = gt, pheno = ph)
+
+rm(pr36)
+```
+
+I don't really see a pattern here. NZO hets (E) are low, but the NZO homozygote (EE) is high. The three genotypes with the lowest values have NZO (E) genotypes. But another genotype with zero cells has an AD genotype. 
+
+The phenotype distribution is also skewed.
+
+```{r d1num1cell_hist}
+hist(ph, breaks = 20, main = 'Day 1 Num 1-cells')
+```
+
+Map Day 1 1-cells with total oocytes and number of clutches as a covariate.
+
+```{r}
+addcovar = cbind(addcovar, covar$NumbClutches)[,-1]
+
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map Day 1 1-cells with total oocytes and with mice that have less than two clutches removed.
+
+```{r}
+addcovar = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+samples  = rownames(covar)[covar$NumbClutches == 2]
+
+qtl = scan1(genoprobs = probs[samples,], 
+            pheno     = ph[samples,, drop = FALSE],
+            kinship   = K,
+            addcovar  = addcovar[samples,,drop = FALSE])
+plot(qtl, map, main = paste(pheno_name, 'Two clutch only'))
+```
+
+This changes the LOD profile and looks more reasonable, without the spikes.
+
+Map rankZ-transformed phenotype with date and total oocytes as covariates. Remove samples with less than two  clutches.
+
+```{r d1num1cell_qtl_rz}
+addcovar    = model.matrix(~ ., data = covar[samples,covar_names, drop = FALSE])[,-1, drop = FALSE]
+ph  = pheno_rz[samples,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs[samples,], 
+            pheno     = ph[samples,,drop = FALSE],
+            kinship   = K,
+            addcovar  = addcovar[samples,,drop = FALSE])
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+```
+
+This dramatically changes the LOD profile. 
+
+Plot the peak on chr 13.
+
+```{r d1num1cell_rz_plot_chr}
+plot(qtl, map, main = paste(pheno_name, 'rankZ'), chr = '13')
+peaks = find_peaks(qtl, map, threshold = 7)
+```
+
+This peak lstill ooks spikey. But it may be a small recombination block.  
+
+```{r d1num1cell_gwas_rz}
+gwas = scan1snps(genoprobs = probs[samples,], map = map, pheno = ph[samples,,drop = FALSE], 
+                 kinship = K, addcovar = addcovar[samples,,drop = FALSE],
+                 query_func = snp_fxn, keep_all_snps = FALSE)
+plot_snpasso(gwas$lod, gwas$snpinfo, main = pheno_name)
+```
+
+Plot the founder allele effects on Chr 13.
+
+```{r d1num1cell_chr13_eff}
+chr = '13'
+feff = scan1blup(genoprobs = probs[samples,chr], 
+                 pheno     = ph[samples,,drop = FALSE],
+                 kinship   = K[[chr]],
+                 addcovar  = addcovar[samples,,drop = FALSE])
+
+plot_coefCC(feff, map, scan1_output = qtl, main = paste(pheno_name, 'rankZ'),
+            legend = 'bottomleft')
+```
+
+Run mediation analysis on the Chr 13 peak.
+
+```{r d1num1cell_chr13_med}
+med = mediation(pheno = ph[samples,,drop = FALSE], covar = addcovar[samples,,drop = FALSE], 
+                probs = probs[samples,], K = K, map = map, expr = norm_expr, annot = annot, chr = chr)
+plot(med_lod ~ pos, data = med, las = 1, main = pheno_name,
+     xlab = 'Gene Position (Mb)', ylab = 'LOD')
+wh = which(med$med_lod < 6)
+text(med$pos[wh], med$med_lod[wh], labels = med$symbol[wh])
+abline(v = peaks$pos, col = 2)
+```
+
+*Cdc14b* on Alliance for Genome Resources: <https://www.alliancegenome.org/gene/MGI:2441808> 
+
+"Predicted to enable protein serine/threonine phosphatase activity and protein tyrosine phosphatase activity. Predicted to be involved in cilium assembly; microtubule cytoskeleton organization; and regulation of cell cycle process. Predicted to act upstream of or within DNA repair. Predicted to be located in nucleoplasm. Predicted to be active in cytoplasm; microtubule cytoskeleton; and nucleolus. Is expressed in embryo. Orthologous to several human genes including CDC14B (cell division cycle 14B)."
+
+"PHENOTYPE: Mice homozygous for a knock-out allele exhibit premature aging, including premature cataracts and kyphosis; reduced fertility, particularly in female mice; "
+
+Perform association mapping in the QTL interval on Chr 13.
+
+```{r d1num1cell_assoc}
+peaks = find_peaks(qtl, map)
+peaks = peaks[peaks$chr == chr,]
+start = peaks$pos
+end   = peaks$pos + 2
+
+assoc = scan1snps(genoprobs = probs[samples,chr], map = map, pheno = ph[samples,, drop = FALSE], 
+                  kinship = K[[chr]], addcovar = addcovar[samples,,drop = FALSE],
+                  query_func = snp_fxn, chr = chr, start = start,
+                  end = end, keep_all_snps = TRUE)
+
+g = gene_fxn(chr, start, end)
+plot_snpasso(assoc$lod, assoc$snpinfo, drop_hilit = 0.5, genes = g, sdp_panel = TRUE, 
+             panel_prop = c(0.25, 0.2, 0.55), colors = 'black', main = pheno_name)
+```
+
+Get the SNPs with the highest LOD scores and intersect them with Ensembl regulatory regions.
+
+```{r get_ensembl_reg}
+ts = top_snps(assoc$lod, assoc$snpinfo, drop = 0.5)
+ts = GRanges(seqnames = ts$chr, ranges = IRanges(start = ts$pos * 1e6, width = 1),
+             mcols = ts[,-c(2:3,5,16:19)])
+colnames(mcols(ts)) =sub('^mcols\\.', '', colnames(mcols(ts))) 
+
+a = listAttributes(mart)
+f = listFilters(mart)
+
+bm = getBM(attributes = a$name, filters = c('chromosome_name', 'start', 'end'),
+           values = list(chromosome_name = '13', start = 64250000, end = 64500000), 
+           mart = mart)
+
+bm = GRanges(seqnames = bm$chromosome_name, ranges = IRanges(start = bm$chromosome_start, end = bm$chromosome_end), mcols = bm[,-c(1, 5:7, 9, 11:14)])
+colnames(mcols(bm)) =sub('^mcols\\.', '', colnames(mcols(bm))) 
+
+ol = findOverlaps(bm, ts)
+
+ol = cbind(as.data.frame(ts[subjectHits(ol)]),
+           as.data.frame(bm[queryHits(ol)]))
+
+table(ol$feature_type_name)
+```
+
+There some SNPs that intersect with and enhancer. Which onces are these?
+
+```{r snp_enhancer}
+unique(subset(ol[,c(1:27)], feature_type_name == 'Enhancer'))
+```
+
+### Day 1 Number of Dead 1-cells
+
+Heritability: `r format(herit$herit[herit$phenotype == 'DAY1Numb1Dead'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r d1num1deadcell_get_pheno}
+pheno_name = 'DAY1NumbDead'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(transform == 'log') {
+  ph[,1] = log(ph[,1])
+} else if(transform == 'log1p') {
+  ph[,1] = log1p(ph[,1])
+} else if(transform == 'sqrt') {
+  ph[,1] = sqrt(ph[,1])
+}
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r d1num1deadcell_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map rankZ-transformed phenotype.
+
+```{r d1numdead1cell_qtl_rz}
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+```
+
+Plot the founder allele effects on Chr 1.
+
+```{r day1numdead_chr1_eff}
+chr = '1'
+feff = scan1blup(genoprobs = probs[,chr], 
+                 pheno     = ph,
+                 kinship   = K[[chr]],
+                 addcovar  = addcovar)
+plot_coefCC(feff, map, scan1_output = qtl, main = paste(pheno_name, 'rankZ'),
+            legend = 'bottomright')
+```
+
+Perform association mapping in the QTL interval on Chr 1.
+
+```{r d1numdead_assoc}
+peaks = find_peaks(qtl, map)
+peaks = peaks[peaks$chr == chr,]
+start = 12
+end   = 15
+
+assoc = scan1snps(genoprobs = probs[samples,chr], map = map, pheno = ph[samples,,drop = FALSE], 
+                  kinship = K[[chr]], addcovar = addcovar[samples,,drop = FALSE],
+                  query_func = snp_fxn, chr = chr, start = start,
+                  end = end, keep_all_snps = TRUE)
+
+g = gene_fxn(chr, start, end)
+plot_snpasso(assoc$lod, assoc$snpinfo, drop_hilit = 0.5, genes = g, sdp_panel = TRUE, 
+             panel_prop = c(0.25, 0.2, 0.55), colors = 'black', main = pheno_name)
+```
+
+The linkage peaks was closer to 4.5 Mb, but the association mapping peaks is near 13.5 Mb. 
+
+Get the SNPs with the highest LOD scores and retain those with missense, splice or stop variants.
+
+```{r d1numdead_chr1_topsnps}
+ts = top_snps(assoc$lod, assoc$snpinfo, drop = 0.5)
+ts = ts[grep('missense|splice|stop', ts$consequence),]
+ts
+```
+
+There are no coding variants among the top SNPs. I can't tell if there is anything interesting under this peak.
+
+Run mediation analysis on the Chr 1 peak.
+
+```{r d1numdead_chr1_med}
+med = mediation(pheno = ph[samples,,drop = FALSE], covar = addcovar[samples,,drop = FALSE], 
+                probs = probs[samples,], K = K, map = map, expr = norm_expr, annot = annot, chr = chr)
+plot(med_lod ~ pos, data = med, las = 1, main = pheno_name,
+     xlab = 'Gene Position (Mb)', ylab = 'LOD')
+wh = which(med$med_lod < 6)
+if(length(wh > 0)) {
+  text(med$pos[wh], med$med_lod[wh], labels = med$symbol[wh])
+}
+abline(v = peaks$pos, col = 2)
+```
+
+I don't see any genes that look significant in the mediation analysis.
+
+### Day 1 Number of Fragmented 1-cells
+
+Heritability: `r format(herit$herit[herit$phenotype == 'DAY1NumbFrag'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r d1num1fragcell_get_pheno}
+pheno_name = 'DAY1NumbFrag'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(transform == 'log') {
+  ph[,1] = log(ph[,1])
+} else if(transform == 'log1p') {
+  ph[,1] = log1p(ph[,1])
+} else if(transform == 'sqrt') {
+  ph[,1] = sqrt(ph[,1])
+}
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r d1num1fragcell_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map rankZ-transformed phenotype.
+
+```{r d1numfrag1cell_qtl_rz}
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+```
+
+### Total Oocytes
+
+Heritability: `r format(herit$herit[herit$phenotype == 'TotalOocytes'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r totaloocytes_get_pheno}
+pheno_name = 'TotalOocytes'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(!is.na(transform)) {
+  if(transform == 'log') {
+    ph[,1] = log(ph[,1])
+  } else if(transform == 'log1p') {
+    ph[,1] = log1p(ph[,1])
+  } else if(transform == 'sqrt') {
+    ph[,1] = sqrt(ph[,1])
+  }
+} # if(!is.na(transform))
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r totaloocytes_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+I don't see any peaks worth pursuing here.
+
+Map Total Oocytes with date and body weight as covariates.
+
+```{r totaloocytes_qtl_with_bw}
+addcovar = model.matrix(~ date, data = covar)[,-1, drop = FALSE]
+addcovar = cbind(addcovar, weight = pheno[,'Weight'])
+
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'with body weight'))
+```
+
+Body weight doesn't seem to improve the mapping.
+
+Map Total Oocytes with the quantity of RNA isolated from ovaries. This may not make sense since they are strongly correlated. But this may be like mapping number of oocytes, adjusted for ovary size.
+
+```{r oocytes_rna_corr}
+df = merge(pheno, rna, by = 'row.names')
+df = df[,c('Row.names', 'TotalOocytes', 'mass')]
+df$mass = log(df$mass)
+
+plot(mass ~ TotalOocytes, data = df, las = 1, pch = 16,
+     ylab = 'log(RNA mass)')
+mod = lm(mass ~ TotalOocytes, data = df)
+abline(mod)
+  
+rm(df)
+```
+
+```{r oocytes_rna_mod}
+summary(mod)
+```
+
+
+```{r totaloocytes_qtl_rz}
+addcovar = model.matrix(~ date + NumbClutches, data = covar)[,-1, drop = FALSE]
+addcovar = merge(addcovar, rna, by = 'row.names')
+rownames(addcovar) = addcovar$Row.names
+addcovar = addcovar[,c(2:8, 11)]
+
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'with RNA quantity'))
+```
+
+
+Map rankZ-transformed phenotype with date as a covariate and only samples with two clutches.
+
+```{r totaloocytes_qtl_rz_2clutch}
+addcovar = model.matrix(~ date, data = covar)[,-1, drop = FALSE]
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs[samples,], 
+            pheno     = ph[samples,,drop = FALSE],
+            kinship   = K,
+            addcovar  = addcovar[samples,,drop = FALSE])
+plot(qtl, map, main = paste(pheno_name, 'rankZ, two clutch only'))
+```
+
+```{r totaloocytes_gwas_rz}
+gwas = scan1snps(genoprobs = probs[samples,], map = map, pheno = ph[samples,,drop = FALSE], 
+                 kinship = K, addcovar = addcovar[samples,,drop = FALSE],
+                 query_func = snp_fxn, keep_all_snps = FALSE)
+plot_snpasso(gwas$lod, gwas$snpinfo, main = paste(pheno_name,'rankZ, two clutch only'))
+```
+
+### Day 2 Number of 2-cells
+
+Heritability: `r format(herit$herit[herit$phenotype == 'DAY2Numb2cells'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r day2num2cells_get_pheno}
+pheno_name = 'DAY2Numb2cells'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(!is.na(transform)) {
+  if(transform == 'log') {
+    ph[,1] = log(ph[,1])
+  } else if(transform == 'log1p') {
+    ph[,1] = log1p(ph[,1])
+  } else if(transform == 'sqrt') {
+    ph[,1] = sqrt(ph[,1])
+  }
+} # if(!is.na(transform))
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r day2num2cells_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map rankZ-transformed phenotype.
+
+```{r day2num2cells_qtl_rz}
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+peaks = find_peaks(qtl, map, threshold = 7)
+```
+
+```{r}
+perm_file = file.path(results_dir, 'rankz_perms.txt')
+
+if(!file.exists(perm_file)) {
+  for(i in 1:10) {
+    print(i)
+    #t1 = proc.time()[3]
+    perms = scan1perm(genoprobs = probs, 
+                      pheno     = ph,
+                      kinship   = K,
+                      addcovar  = addcovar,
+                      n_perm    = 100)
+    #print(proc.time()[3] - t1)
+    write(perms, file = perm_file, ncolumns = 1, append = i > 1, sep = '\n')
+  } # for(i)
+} else {
+  perms = scan(perm_file, sep = '\n')
+} # else
+```
+
+What is the 0.05 threshold with rankZ transformed data?
+
+```{r}
+quantile(perms, 0.95)
+```
+
+Plot the LOD on Chr 9.
+
+```{r}
+plot(qtl, map, chr = 9)
+```
+
+Plot the founder allele effects on Chr 9.
+
+```{r day2num2cells_chr13_eff}
+chr = '9'
+feff = scan1blup(genoprobs = probs[,chr], 
+                 pheno     = ph,
+                 kinship   = K[[chr]],
+                 addcovar  = addcovar)
+plot_coefCC(feff, map, scan1_output = qtl, main = paste(pheno_name, 'rankZ'),
+            legend = 'bottomright')
+```
+
+Run mediation analysis on the Chr 9 peak.
+
+```{r day2num2cells_chr9_med}
+med = mediation(pheno = ph, covar = addcovar, probs = probs, K = K, map = map, 
+                expr = norm_expr, annot = annot, chr = chr)
+plot(med_lod ~ pos, data = med, las = 1, main = pheno_name,
+     xlab = 'Gene Position (Mb)', ylab = 'LOD')
+wh = which(med$med_lod < 6)
+text(med$pos[wh], med$med_lod[wh], labels = med$symbol[wh])
+abline(v = peaks$pos, col = 2)
+```
+
+*Cbl* page at Alliance for Genome Resources: <https://www.alliancegenome.org/gene/MGI:88279>
+
+"Enables SH3 domain binding activity and ephrin receptor binding activity. Involved in regulation of platelet-derived growth factor receptor-alpha signaling pathway. Acts upstream of or within regulation of Rap protein signal transduction. Located in Golgi apparatus and cilium. Part of flotillin complex. Is expressed in male reproductive system and urinary system. Human ortholog(s) of this gene implicated in acute myeloid leukemia; juvenile myelomonocytic leukemia; lung non-small cell carcinoma; and myeloid neoplasm. Orthologous to human CBL (Cbl proto-oncogene)."
+
+"Homozygotes for targeted null mutations exhibit increased thymic CD3 and CD4 expression and tyrosine-phosphorylation, lymphoid hyperplasia, and altered splenic hemopoiesis. Females show increased ductal density and branching in mammary fat pads."
+
+*Arcn1* page at Alliance for Genome Resources: <https://www.alliancegenome.org/gene/MGI:2387591>
+
+"Acts upstream of or within several processes, including Golgi vesicle transport; adult locomotory behavior; and cerebellar Purkinje cell layer maturation. Located in COPI-coated vesicle; Golgi apparatus; and endoplasmic reticulum. Is expressed in several structures, including genitourinary system. Orthologous to human ARCN1 (archain 1)."
+
+"Mice homozygous for a spontaneous mutation have a dilute coat color and neurological defects."
+
+
+```{r day2num2cells_assoc}
+peaks = find_peaks(qtl, map)
+peaks = peaks[peaks$chr == chr,]
+start = peaks$pos - 1
+end   = peaks$pos + 1
+
+assoc = scan1snps(genoprobs = probs[,chr], map = map, pheno = ph, kinship = K[[chr]],
+                  addcovar = addcovar, query_func = snp_fxn, chr = chr, start = start,
+                  end = end, keep_all_snps = TRUE)
+
+g = gene_fxn(chr, start, end)
+plot_snpasso(assoc$lod, assoc$snpinfo, drop_hilit = 0.5, genes = g, sdp_panel = TRUE, 
+             panel_prop = c(0.25, 0.2, 0.55), colors = 'black', main = pheno_name)
+```
+
+### Fertilized
+
+Heritability: `r format(herit$herit[herit$phenotype == 'Fertilized'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r fertilized_get_pheno}
+pheno_name = 'Fertilized'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(!is.na(transform)) {
+  if(transform == 'log') {
+    ph[,1] = log(ph[,1])
+  } else if(transform == 'log1p') {
+    ph[,1] = log1p(ph[,1])
+  } else if(transform == 'sqrt') {
+    ph[,1] = sqrt(ph[,1])
+  }
+} # if(!is.na(transform))
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r fertilized_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map Fertilized^2.
+
+```{r fertilized_qtl2}
+ph[,1] = ph[,1]^2
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'squared'))
+```
+
+Map rankZ-transformed phenotype.
+
+```{r fertilized_qtl_rz}
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+peaks = find_peaks(qtl, map, threshold = 7)
+```
+
+### Day 2 number of dead 2-cells
+
+Heritability: `r format(herit$herit[herit$phenotype == 'DAY2NumbDead'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r d2numdead_get_pheno}
+pheno_name = 'DAY2NumbDead'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(!is.na(transform)) {
+  if(transform == 'log') {
+    ph[,1] = log(ph[,1])
+  } else if(transform == 'log1p') {
+    ph[,1] = log1p(ph[,1])
+  } else if(transform == 'sqrt') {
+    ph[,1] = sqrt(ph[,1])
+  }
+} # if(!is.na(transform))
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r d2numdead_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map rankZ-transformed phenotype.
+
+```{r d2numdead_qtl_rz}
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+```
+
+### Day 2 number of fragmented 2-cells
+
+Heritability: `r format(herit$herit[herit$phenotype == 'DAY2NumbFrag'], digits = 2)`
+
+Gather phenotype and covariates.
+
+```{r d2numfrag_get_pheno}
+pheno_name = 'DAY2NumbFrag'
+ph = pheno[,pheno_name, drop = FALSE]
+
+meta_row  = which(meta$column == pheno_name)
+transform = meta$transform[meta_row]
+
+if(!is.na(transform)) {
+  if(transform == 'log') {
+    ph[,1] = log(ph[,1])
+  } else if(transform == 'log1p') {
+    ph[,1] = log1p(ph[,1])
+  } else if(transform == 'sqrt') {
+    ph[,1] = sqrt(ph[,1])
+  }
+} # if(!is.na(transform))
+
+covar_names = strsplit(meta$covar[meta_row], split = ';')[[1]]
+addcovar    = model.matrix(~ ., data = covar[,covar_names, drop = FALSE])[,-1, drop = FALSE]
+```
+
+Map phenotype with `r paste(covar_names, collapse = ',')` as covariates.
+
+```{r d2numfrag_qtl}
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = pheno_name)
+```
+
+Map rankZ-transformed phenotype.
+
+```{r d2numfrag_qtl_rz}
+ph  = pheno_rz[,pheno_name, drop = FALSE]
+qtl = scan1(genoprobs = probs, 
+            pheno     = ph,
+            kinship   = K,
+            addcovar  = addcovar)
+plot(qtl, map, main = paste(pheno_name, 'rankZ'))
+```
