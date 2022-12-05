@@ -10,8 +10,12 @@
 ################################################################################
 options(stringsAsFactors = FALSE)
 
+library(AnnotationHub)
+library(ensembldb)
+library(DESeq2)
 library(qtl2convert)
 library(qtl2)
+library(readxl)
 library(tidyverse)
 
 ##### VARIABLES #####
@@ -23,7 +27,22 @@ out_dir  = file.path(base_dir, 'results')
 marker_dir  = '/projects/omics_share/mouse/GRCm38/supporting_files/gbrs/rel_1505_v5'
 marker_file = file.path(marker_dir, 'ref.genome_grid.69k.noYnoMT_KBEdit.txt')
 
+# GBRS docs say that they used GencodeM23 for transcript annotation.
+# This corresponds to Ensembl 98 according to the header in:
+# https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M23/gencode.vM23.annotation.gtf.gz
+hub   = AnnotationHub()
+hub   = query(hub, c('ensdb', 'mus musculus', '98'))
+ensdb = hub[['AH75036']] # ensembl 98
+#ensdb = hub[['AH78811']] # ensembl 99
+
 ##### MAIN #####
+
+# Get gene annotation.
+annot = genes(ensdb)
+
+# Read in phenotypes.
+pheno = read_xlsx(file.path(base_dir, 'data', 'JDO_Superovulation_collect_1_2_3.xlsx'),
+                  sheet = 'Data')
 
 # Read in markers.
 markers = read_delim(marker_file, delim = '\t')
@@ -64,6 +83,7 @@ for(d in sample_dirs) {
                    full.names = TRUE)
   
   if(length(count_file) == 0) {
+    print('DIRECTORY WAS EMPTY!!!')
     next
   }
   
@@ -88,19 +108,69 @@ for(d in sample_dirs) {
 
 } # for(d)
 
+# Remove '_' from sample names.
+rownames(gene_counts) = sub('_', '', rownames(gene_counts))
+rownames(iso_counts)  = sub('_', '', rownames(iso_counts))
+rownames(probs)       = sub('_', '', rownames(probs))
+
+# If there are samples for which all counts equal zero, then set the counts 
+# for that sample to NA.
+wh = which(rowSums(gene_counts) == 0)
+
+print(paste(paste(rownames(gene_counts)[wh], sep = ','), sep = ' '))
+
+if(length(wh) > 0) {
+  gene_counts[wh,,] = NA
+  iso_counts[wh,,]  = NA
+  probs[wh,,]       = NA
+} # if(length(wh) > 0)
+
 # Write out results files.
 saveRDS(gene_counts, file = file.path(out_dir, 'sodo_gene_allele_counts.rds'))
 saveRDS(iso_counts,  file = file.path(out_dir, 'sodo_transcript_allele_counts.rds'))
 saveRDS(probs,       file = file.path(out_dir, 'sodo_gbrs_genoprobs_69K.rds'))
-write_csv(as.data.frame(geno), file = file.path(out_dir, 'sodo_gene_genotypes.csv'))
+geno = as.data.frame(geno) %>% 
+         rownames_to_column(var = 'ensembl')
+write_csv(geno, file = file.path(out_dir, 'sodo_gene_genotypes.csv'))
 
-# Gather total gene and transcript counts.
+# Gather total gene counts.
 counts = apply(gene_counts, c(1, 3), sum, na.rm = TRUE)
 counts = as.data.frame(t(counts))
 counts = counts %>%
            rownames_to_column(var = 'ensembl')
 write_csv(counts, file = file.path(out_dir, 'sodo_gene_counts.csv'))
 
+# Get VST normalized data.
+counts = data.frame(counts)
+rownames(counts) = counts$ensembl
+counts = as.matrix(counts[,-1])
+counts = round(counts)
+
+metadata = pheno[, c('Female number', 'FreshIVF_IVFDISHES::IVF Date')]
+colnames(metadata) = c('mouse', 'date')
+metadata$mouse = paste0('SODO', metadata$mouse)
+metadata = as.data.frame(metadata)
+rownames(metadata) = metadata$mouse
+metadata$date = factor(metadata$date)
+metadata = metadata[colnames(counts),]
+
+# Normalize counts using DESeq's VST.
+dds = DESeqDataSetFromMatrix(countData = counts, colData = metadata, design = ~ date)
+dds = DESeq(dds)
+vst = assay(vst(dds))
+vst %>%
+  as.data.frame() %>%
+  rownames_to_column(var = 'ensembl') %>%
+  write_csv(file = file.path(out_dir, 'sodo_gene_counts_norm.csv'))
+
+# Write gene annotation.
+annot = subset(annot, names(annot) %in% rownames(vst))
+annot = as.data.frame(annot)
+annot = annot[rownames(vst),]
+annot = select(annot, chr = seqnames, start, end, strand, gene_id, gene_name,                           gene_biotype, symbol, entrezid)
+write_csv(annot, file = file.path(out_dir, 'gene_annotation_ens98.csv'))
+
+# Gather total transcript counts.
 counts = apply(iso_counts, c(1, 3), sum, na.rm = TRUE)
 counts = as.data.frame(t(counts))
 counts = counts %>%

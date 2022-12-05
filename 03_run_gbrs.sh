@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=1 # number of cores
 #SBATCH --mem=4G # memory pool for all cores
 #SBATCH --time=10:00:00 # time (D-HH:MM)
-#SBATCH --array=45,152-169,266
+#SBATCH --array=152-160
 
 ################################################################################
 # Run GBRS on each sample.
