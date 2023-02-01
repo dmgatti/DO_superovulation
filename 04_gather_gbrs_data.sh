@@ -15,5 +15,5 @@ R=~/containers/bioconductor.sif
 
 module load singularity
 
-singularity run ${R} Rscript --no-save 04_gather_gbrs_data.R
+singularity exec ${R} Rscript --no-save 04_gather_gbrs_data.R
 

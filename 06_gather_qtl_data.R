@@ -44,12 +44,12 @@ rankZ = function(x) {
 ##### MAIN #####
 
 # Read in phenotypes.
-pheno = read_xlsx(file.path(data_dir, 'JDO_Superovulation_collect_1_2_3.xlsx'), 
-                  sheet = 'Data')
+pheno = read_xlsx(file.path(data_dir, 'JDO9376 all 350.xlsx'), 
+                  sheet = 'Sheet1')
 # Read in covariates.
-covar = read.csv(file.path(data_dir, 'do_superovulation_animal_info.csv'))
+covar = read.csv(file.path(data_dir, 'genotypes', 'do_superovulation_animal_info.csv'))
 # Read in genoprobs.
-probs = readRDS(file.path(data_dir, 'bolcun-filas1__GigaMUGA_genoprobs_8state.rds'))
+probs = readRDS(file.path(data_dir, 'sodo_alleleprobs_grcm38.rds'))
 # Read in markers.
 markers = read.csv(file.path(marker_dir, 'gm_uwisc_v1.csv'))
 markers$bp_mm10 = markers$bp_mm10 * 1e-6
@@ -87,9 +87,9 @@ pheno = as.matrix(pheno[,-(1:2)])
 # Also remove markers with allele frequencies less than 1 for any one founder.
 for(chr in seq_along(probs)) {
 
-  rownames(probs[[chr]]) = gsub('^Jackson_Lab_Filas_MURGIGV01_20220929_SO|_T_[A-H][0-9]+$', '', rownames(probs[[chr]]))
-  rownames(probs[[chr]]) = gsub('^Jackson_Lab_Filas_MURGIGV01_20220929_DO_QTL_T |_[A-H][0-9]+$', '', rownames(probs[[chr]]))
-  rownames(probs[[chr]]) = paste0('SODO', rownames(probs[[chr]]))
+#  rownames(probs[[chr]]) = gsub('^Jackson_Lab_Filas_MURGIGV01_20220929_SO|_T_[A-H][0-9]+$', '', rownames(probs[[chr]]))
+#  rownames(probs[[chr]]) = gsub('^Jackson_Lab_Filas_MURGIGV01_20220929_DO_QTL_T |_[A-H][0-9]+$', '', rownames(probs[[chr]]))
+#  rownames(probs[[chr]]) = paste0('SODO', rownames(probs[[chr]]))
   probs[[chr]] = probs[[chr]][!duplicated(rownames(probs[[chr]])),,]
   
   # Check allele frequencies.
@@ -134,7 +134,7 @@ annot     = annot[common_genes,]
 
 # Save Rdata file with all QTL mapping data.
 save(pheno, pheno_rz, covar, probs, K, map, counts, norm_expr, annot,
-     file = file.path(data_dir, 'superovulation_qtl2.Rdata'))
+     file = file.path(data_dir, 'superovulation_qtl2_grcm38.Rdata'))
 
 
 

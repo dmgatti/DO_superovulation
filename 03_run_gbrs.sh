@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=1 # number of cores
 #SBATCH --mem=4G # memory pool for all cores
 #SBATCH --time=10:00:00 # time (D-HH:MM)
-#SBATCH --array=152-160
+#SBATCH --array=2-50
 
 ################################################################################
 # Run GBRS on each sample.
@@ -48,16 +48,16 @@ OUT_DIR=${FASTSCRATCH}/results/${SAMPLE}
 DEST_DIR=${BASE_DIR}/results/gbrs/${SAMPLE}
 
 # GBRS Nextflow pipeline
-GBRS_PATH=/fastscratch/dgatti/gbrs/main.nf
+GBRS_PATH=${FASTSCRATCH}/gbrs/main.nf
 
 # Number of threads.
 NUM_THREADS=8
 
 # Temporary working directory.
-TMP_DIR=/fastscratch/dgatti/tmp/${SAMPLE}
+TMP_DIR=${FASTSCRATCH}/tmp/${SAMPLE}
 
 # Singularity cache directory.
-export NXF_SINGULARITY_CACHEDIR=/fastscratch/dgatti/singularity_cache
+export NXF_SINGULARITY_CACHEDIR=${FASTSCRATCH}/singularity_cache
 
 ##### MAIN #####
 
@@ -82,13 +82,13 @@ nextflow run ${GBRS_PATH} -profile singularity,sumner \
 
 # Copy output files from OUT_DIR to DEST_DIR.
 SAMPLE_PATH=${OUT_DIR}/`ls ${OUT_DIR}`
-cp ${SAMPLE_PATH}/*counts ${DEST_DIR}
-cp ${SAMPLE_PATH}/*.tsv ${DEST_DIR}
-cp ${SAMPLE_PATH}/*.tpm ${DEST_DIR}
-cp ${SAMPLE_PATH}/*.pdf ${DEST_DIR}
+#cp ${SAMPLE_PATH}/*counts ${DEST_DIR}
+#cp ${SAMPLE_PATH}/*.tsv ${DEST_DIR}
+#cp ${SAMPLE_PATH}/*.tpm ${DEST_DIR}
+#cp ${SAMPLE_PATH}/*.pdf ${DEST_DIR}
 
-QC_FILE=`find . -name *summary_stats.txt`
-cp ./${QC_FILE} ${DEST_DIR}
+#QC_FILE=`find . -name *summary_stats.txt`
+#cp ./${QC_FILE} ${DEST_DIR}
 
 # Cleanup
 # Remove TMP_DIR
