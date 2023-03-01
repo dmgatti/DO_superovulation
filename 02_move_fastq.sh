@@ -6,9 +6,10 @@
 #SBATCH --time=04:00:00 # time (D-HH:MM)
 
 ################################################################################
-# copy FASTQ files over to /fastscratch
+# Copy DO FASTQ files over to /fastscratch
 #
 # Daniel Gatti
+# dan.gatti@jax.org
 # 2022-09-28
 ################################################################################
 
@@ -16,7 +17,8 @@
 ### VARIABLES ###
 
 # Source directory where original FASTQ files are stored.
-SRC_DIR=/projects/bolcun-filas-lab/DO_Superovulation/data/rnaseq/fastq
+SRC_DIR1=/projects/bolcun-filas-lab/DO_Superovulation/data/rnaseq/fastq/run1
+SRC_DIR2=/projects/bolcun-filas-lab/DO_Superovulation/data/rnaseq/fastq/run2
 
 # Destination directory on /fastscratch.
 DEST_DIR=/fastscratch/dgatti/fastq
@@ -26,5 +28,8 @@ DEST_DIR=/fastscratch/dgatti/fastq
 
 mkdir -p ${DEST_DIR}
 
-cp ${SRC_DIR}/*.gz ${DEST_DIR}
+cp ${SRC_DIR1}/SODO*.fastq.gz ${DEST_DIR}
+
+cp ${SRC_DIR2}/SODO*.fastq.gz ${DEST_DIR}
+
 
