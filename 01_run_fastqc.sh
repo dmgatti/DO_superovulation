@@ -20,8 +20,10 @@
 # Top level directory for project.
 BASE_DIR=/projects/bolcun-filas-lab/DO_Superovulation
 
-# Full path to the FASTQ file directory.
-FASTQ_DIR=${BASE_DIR}/data/rnaseq/fastq
+# Full path to the FASTQ file directories.
+FASTQ_DIR1=${BASE_DIR}/data/rnaseq/fastq/run1
+FASTQ_DIR2=${BASE_DIR}/data/rnaseq/fastq/run2
+FASTQ_DIR3=${BASE_DIR}/data/rnaseq/fastq/run3
 
 # Full path to the FastQC output directory.
 OUTPUT_DIR=${BASE_DIR}/results/fastqc
@@ -37,10 +39,25 @@ module load singularity
 mkdir -p ${BASE_DIR}/results/fastqc
 
 # Run FastQC on all fastq files.
+echo "Processing run1"
 singularity exec ${FASTQC} fastqc \
                               --threads 30 \
                               --outdir ${OUTPUT_DIR} \
-                              ${FASTQ_DIR}/*.gz
+                              ${FASTQ_DIR1}/*.gz
+
+echo "Processing run2"
+singularity exec ${FASTQC} fastqc \
+                              --threads 30 \
+                              --outdir ${OUTPUT_DIR} \
+                              ${FASTQ_DIR2}/*.gz
+
+echo "Processing run3"
+singularity exec ${FASTQC} fastqc \
+                              --threads 30 \
+                              --outdir ${OUTPUT_DIR} \
+                              ${FASTQ_DIR3}/*.gz
+                              
 
 # Run MultiQC to summarize FastQC results.
 singularity exec ${MULTIQC} multiqc ${OUTPUT_DIR}
+
