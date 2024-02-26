@@ -4,8 +4,8 @@
 #SBATCH --ntasks 1 # number of tasks
 #SBATCH --cpus-per-task 8
 #SBATCH --mem 32G # memory pool for all cores
-#SBATCH --time 0-3:00 # time (D-HH:MM)
-#SBATCH --array=1-300
+#SBATCH --time 0-12:00 # time (D-HH:MM)
+#SBATCH --array=347
 
 ################################################################################
 # Use RSEM & STAR to estimate gene counts aligned to  GRCm39.
@@ -21,10 +21,12 @@
 SCRATCH_DIR=/fastscratch/dgatti
 
 # Genome build
-GENOME=GRCm39
+GENOME=grcm38
+#GENOME=grcm39
 
 # Ensembl version
-ENSEMBL=105
+ENSEMBL=102
+#ENSEMBL=106
 
 # Output directory for STAR/RSEM index.
 GENOME_DIR=${SCRATCH_DIR}/${GENOME}_index/rsem_
@@ -36,7 +38,7 @@ BASE_DIR=/projects/bolcun-filas-lab/DO_Superovulation
 RESULTS_DIR=${BASE_DIR}/results/star_rsem_${GENOME}
 
 # FASTQ file directory.
-FASTQ_DIR=${SCRATCH_DIR}/sodo/fastq
+FASTQ_DIR=${SCRATCH_DIR}/fastq
 
 # Number of threads.
 NUM_THREADS=8
@@ -55,6 +57,16 @@ SAMPLE=`basename ${FASTQ_FILES[0]}`
 SAMPLE=`echo ${SAMPLE} | sed -E "s/_GT22-[0-9]+_[ACGT]+-[ACGT]+_S[0-9]+_L00[0-9]+_R[0-9]_001.fastq.gz$//"`
 
 echo SAMPLE=${SAMPLE}
+
+# Some samples have multiple files. Separate out the R1 and R2 files. 
+R1_FILES=`ls -1 ${FASTQ_DIR}/*.gz | grep -E "SODO(_)?${SLURM_ARRAY_TASK_ID}_.+R1"`
+R2_FILES=`ls -1 ${FASTQ_DIR}/*.gz | grep -E "SODO(_)?${SLURM_ARRAY_TASK_ID}_.+R2"`
+
+R1_FILES=${R1_FILES[@]}
+R2_FILES=${R2_FILES[@]}
+
+R1_FILES=${R1_FILES/ /,}
+R2_FILES=${R2_FILES/ /,}
 
 # RSEM output directory.
 OUT_DIR=${SCRATCH_DIR}/sodo/${GENOME}
@@ -75,8 +87,8 @@ module load singularity
 
 echo Aligning sample ${SAMPLE}
 
-echo ${FASTQ_FILES[0]}
-echo ${FASTQ_FILES[1]}
+echo ${R1_FILES[0]}
+echo ${R2_FILES[1]}
 
 # Using STAR to align and  RSEM to quantify.
 singularity exec ${STAR_RSEM} rsem-calculate-expression \
@@ -87,7 +99,7 @@ singularity exec ${STAR_RSEM} rsem-calculate-expression \
    --append-names \
    --star-gzipped-read-file \
    --temporary-folder ${TEMP_DIR} \
-   ${FASTQ_FILES[0]} ${FASTQ_FILES[1]} \
+   ${R1_FILES} ${R2_FILES} \
    ${GENOME_DIR} \
    ${OUT_DIR}/${SAMPLE}_
 

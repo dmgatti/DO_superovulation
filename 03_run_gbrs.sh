@@ -2,15 +2,15 @@
 #SBATCH --qos=batch
 #SBATCH --ntasks=1 # number of nodes
 #SBATCH --cpus-per-task=1 # number of cores
-#SBATCH --mem=4G # memory pool for all cores
-#SBATCH --time=10:00:00 # time (D-HH:MM)
-#SBATCH --array=2-50
+#SBATCH --mem=1G # memory pool for all cores
+#SBATCH --time=48:00:00 # time (D-HH:MM)
 
 ################################################################################
 # Run GBRS on each sample.
-# GRCm38.p6. Gencode M23. 
+# GRCm39. Ensembl 105. 
 #
 # Daniel Gatti
+# dan.gatti@jax.org
 # 2022-09-28
 ################################################################################
 
@@ -20,41 +20,50 @@
 # Base directory for project.
 BASE_DIR=/projects/bolcun-filas-lab/DO_Superovulation
 
+# Sample metadata file.
+SAMPLE_META_FILE=${BASE_DIR}/data/sodo_gbrs_metadata.csv
+
 # Base /fastscratch directory.
 FASTSCRATCH=/fastscratch/dgatti
 
-# FASTQ file directory.
-FASTQ_DIR=${FASTSCRATCH}/fastq
-
-# Sample ID.
-FASTQ_FILES=`ls -1 ${FASTQ_DIR}/*.gz | grep -E "SODO(_)?${SLURM_ARRAY_TASK_ID}_"`
-FASTQ_FILES=($FASTQ_FILES)
-
-if [ -z $FASTQ_FILES ]
-then
-   echo No Sample ${SLURM_ARRAY_TASK_ID}
-   exit 0
-fi
-
-SAMPLE=`basename ${FASTQ_FILES[0]}`
-SAMPLE=`echo ${SAMPLE} | sed -E "s/_GT22-[0-9]+_[ACGT]+-[ACGT]+_S[0-9]+_L00[0-9]+_R[0-9]_001.fastq.gz$//"`
-
-echo SAMPLE=${SAMPLE}
+# Temporary directory.
+TMP_DIR=${FASTSCRATCH}/tmp
 
 # Output directory.
-OUT_DIR=${FASTSCRATCH}/results/${SAMPLE}
+OUT_DIR=${FASTSCRATCH}/results
 
 # Final results directory (in backed up space)
-DEST_DIR=${BASE_DIR}/results/gbrs/${SAMPLE}
+DEST_DIR=${BASE_DIR}/results/gbrs/grcm39
 
-# GBRS Nextflow pipeline
-GBRS_PATH=${FASTSCRATCH}/gbrs/main.nf
+# GBRS Reference Directory
+GBRS_REF_DIR=/projects/churchill-lab/projects/GBRS_GRCm39
 
-# Number of threads.
-NUM_THREADS=8
+# GBRS Nextflow pipeline.
+GBRS_PATH=${GBRS_REF_DIR}/github_tool_clones/ngs-ops-nf-pipelines/main.nf
 
-# Temporary working directory.
-TMP_DIR=${FASTSCRATCH}/tmp/${SAMPLE}
+# GBRS Transcripts.
+GBRS_TRANSCRIPTS=${GBRS_REF_DIR}/eight_way_transcriptome/full_transcriptome/primary_assembly/emase/emase.fullTranscripts.info
+
+# GBRS/EMASE gene to transcript file.
+GBRS_GENE2TRANS=${GBRS_REF_DIR}/eight_way_transcriptome/full_transcriptome/primary_assembly/emase/emase.gene2transcripts.tsv
+
+# GBRS Full Transcript.
+GBRS_FULL_TRANSCRIPTS=${GBRS_REF_DIR}/eight_way_transcriptome/full_transcriptome/primary_assembly/emase/emase.pooled.fullTranscripts.info
+
+# GBRS Emission Probs.
+GBRS_EMIS_PROBS=${GBRS_REF_DIR}/emission_probabilities/gbrs_emissions_all_tissues.avecs.npz
+
+# GBRS Transmission Probs.
+GBRS_TRANS_PROBS=${GBRS_REF_DIR}/transition_probabilities/full_transcriptome/nextflow_output
+
+# Ensembl 105 gene positions.
+ENSEMBL_105=${GBRS_REF_DIR}/transition_probabilities/full_transcriptome/nextflow_output/ref.gene_pos.ordered_ensBuild_105.npz
+
+# GBRS 69K Marker Grid.
+MARKER_GRID=${GBRS_REF_DIR}/transition_probabilities/full_transcriptome/nextflow_output/ref.genome_grid.GRCm39.tsv
+
+# Bowtie index for GBRS.
+BOWTIE_INDEX=/projects/churchill-lab/projects/GBRS_GRCm39/eight_way_transcriptome/primary_assembly/bowtie/bowtie.transcripts
 
 # Singularity cache directory.
 export NXF_SINGULARITY_CACHEDIR=${FASTSCRATCH}/singularity_cache
@@ -70,27 +79,37 @@ module load singularity
 
 cd ${TMP_DIR}
 
-nextflow run ${GBRS_PATH} -profile singularity,sumner \
-                          -resume \
-                          --fastqR1 ${FASTQ_FILES[0]} \
-                          --fastqR2 ${FASTQ_FILES[1]} \
-                          --outputDir ${OUT_DIR} \
-                          --generation G40 \
-                          --sex F \
-                          --threads ${NUM_THREADS} \
-                          --tmpdir ${TMP_DIR}
+nextflow ${GBRS_PATH} \
+         -profile sumner \
+         --workflow gbrs \
+         --pubdir ${OUT_DIR} \
+         -w ${TMP_DIR} \
+         --bowtie_index ${BOWTIE_INDEX} \
+         --csv_input ${SAMPLE_META_FILE} \
+         --transcripts_info ${GBRS_TRANSCRIPTS} \
+         --gene2transcript_csv ${GBRS_GENE2TRANS} \
+         --full_transcript_info ${GBRS_FULL_TRANSCRIPTS} \
+         --emission_prob_avecs ${GBRS_EMIS_PROBS} \
+         --trans_prob_dir ${GBRS_TRANS_PROBS} \
+         --gene_position_file ${ENSEMBL_105} \
+         --genotype_grid ${MARKER_GRID} \
+         -resume
 
 # Copy output files from OUT_DIR to DEST_DIR.
-SAMPLE_PATH=${OUT_DIR}/`ls ${OUT_DIR}`
-#cp ${SAMPLE_PATH}/*counts ${DEST_DIR}
-#cp ${SAMPLE_PATH}/*.tsv ${DEST_DIR}
-#cp ${SAMPLE_PATH}/*.tpm ${DEST_DIR}
-#cp ${SAMPLE_PATH}/*.pdf ${DEST_DIR}
+DIRS=`ls ${OUT_DIR}`
 
-#QC_FILE=`find . -name *summary_stats.txt`
-#cp ./${QC_FILE} ${DEST_DIR}
+for i in ${DIRS}
+do
 
-# Cleanup
-# Remove TMP_DIR
-cd ../..
-rm -rf ${TMP_DIR}
+  CURR_DEST_DIR=${DEST_DIR}/$i
+
+  mkdir -p ${CURR_DEST_DIR}
+  cp ${OUT_DIR}/${i}/stats/* ${CURR_DEST_DIR}
+  cp ${OUT_DIR}/${i}/gbrs/*_counts ${CURR_DEST_DIR}
+  cp ${OUT_DIR}/${i}/gbrs/*.tsv ${CURR_DEST_DIR}
+  cp ${OUT_DIR}/${i}/gbrs/*.pdf ${CURR_DEST_DIR}
+
+done
+
+
+

@@ -20,20 +20,43 @@ library(tidyverse)
 
 ##### VARIABLES #####
 
+args = commandArgs(trailingOnly = TRUE)
+
+genome = args[1]
+
 base_dir = '/projects/bolcun-filas-lab/DO_Superovulation'
-gbrs_dir = file.path(base_dir, 'results', 'gbrs')
+gbrs_dir = file.path(base_dir, 'results', 'gbrs', genome)
 out_dir  = file.path(base_dir, 'results')
 
 marker_dir  = '/projects/omics_share/mouse/GRCm38/supporting_files/gbrs/rel_1505_v5'
 marker_file = file.path(marker_dir, 'ref.genome_grid.69k.noYnoMT_KBEdit.txt')
 
+if(genome == 'grcm39') {
+
+  marker_dir  = gbrs_dir
+  marker_file = file.path(marker_dir, 'ref.genome_grid.GRCm39.tsv')
+
+} # if(genome == 'grcm39')
+
 # GBRS docs say that they used GencodeM23 for transcript annotation.
 # This corresponds to Ensembl 98 according to the header in:
 # https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M23/gencode.vM23.annotation.gtf.gz
 hub   = AnnotationHub()
-hub   = query(hub, c('ensdb', 'mus musculus', '98'))
-ensdb = hub[['AH75036']] # ensembl 98
-#ensdb = hub[['AH78811']] # ensembl 99
+ensdb = NULL
+
+if(genome == 'grcm38') {
+
+  hub   = query(hub, c('ensdb', 'mus musculus', '98'))
+  ensdb = hub[['AH75036']] # ensembl 98
+  #ensdb = hub[['AH78811']] # ensembl 99
+
+} else {
+
+  # New GRCm39 GBRS pipeline uses Ensembl 105.
+  hub   = query(hub, c('ensdb', 'mus musculus', '105'))
+  ensdb = hub[['AH98078']] # ensembl 105
+
+} # else
 
 ##### MAIN #####
 
@@ -41,14 +64,14 @@ ensdb = hub[['AH75036']] # ensembl 98
 annot = genes(ensdb)
 
 # Read in phenotypes.
-pheno = read_xlsx(file.path(base_dir, 'data', 'JDO_Superovulation_collect_1_2_3.xlsx'),
-                  sheet = 'Data')
+pheno = read_xlsx(file.path(base_dir, 'data', 'JDO9376 all 350.xlsx'),
+                  sheet = 'Sheet1')
 
 # Read in markers.
-markers = read_delim(marker_file, delim = '\t')
+markers = read_delim(marker_file, delim = '\t', show_col_types = FALSE)
 
 # Get sample directories.
-sample_dirs = dir(gbrs_dir)
+sample_dirs = dir(gbrs_dir, pattern = 'SODO')
 
 # Gather expected counts for genes & isoforms, genotypes at genes,
 # and genoprobs.
@@ -57,10 +80,10 @@ count_file = dir(sample_dir, pattern = 'diploid.genes.expected_read_counts$',
                  full.names = TRUE)
 iso_file   = dir(sample_dir, pattern = 'diploid.isoforms.expected_read_counts$',
                  full.names = TRUE) 
-ct  = read_delim(count_file, delim = '\t')
-iso = read_delim(iso_file,   delim = '\t')
-genes       = ct$`#target_id`
-transcripts = iso$`#target_id`
+ct  = read_delim(count_file, delim = '\t', show_col_types = FALSE)
+iso = read_delim(iso_file,   delim = '\t', show_col_types = FALSE)
+genes       = ct$`locus`
+transcripts = iso$`locus`
 
 # Create output data structures.
 gene_counts = array(0, dim = c(length(sample_dirs), 8, length(genes)), 
@@ -87,7 +110,7 @@ for(d in sample_dirs) {
     next
   }
   
-  ct = read_delim(count_file, delim = '\t')
+  ct = read_delim(count_file, delim = '\t', show_col_types = FALSE)
   gene_counts[d,,] = t(as.matrix(ct[,LETTERS[1:8]]))
 
   # Genotype at gene.
@@ -97,13 +120,13 @@ for(d in sample_dirs) {
   iso_file = dir(sample_dir, pattern = 'diploid.isoforms.expected_read_counts$',
                  full.names = TRUE)
   
-  iso = read_delim(iso_file, delim = '\t')
+  iso = read_delim(iso_file, delim = '\t', show_col_types = FALSE)
   iso_counts[d,,] = t(as.matrix(iso[,LETTERS[1:8]]))
 
   # Genoprobs.
   probs_file = dir(sample_dir, pattern = 'gbrs.interpolated.genoprobs.tsv$',
                  full.names = TRUE)
-  pr = read_delim(probs_file, delim = '\t')
+  pr = read_delim(probs_file, delim = '\t', show_col_types = FALSE)
   probs[d,,] = t(as.matrix(pr))
 
 } # for(d)
@@ -120,25 +143,50 @@ wh = which(rowSums(gene_counts) == 0)
 print(paste(paste(rownames(gene_counts)[wh], sep = ','), sep = ' '))
 
 if(length(wh) > 0) {
-  gene_counts[wh,,] = NA
-  iso_counts[wh,,]  = NA
-  probs[wh,,]       = NA
+
+  gene_counts = gene_counts[-wh,,]
+  iso_counts  = iso_counts[-wh,,]
+  probs       = probs[-wh,,]
+  
 } # if(length(wh) > 0)
 
 # Write out results files.
-saveRDS(gene_counts, file = file.path(out_dir, 'sodo_gene_allele_counts.rds'))
-saveRDS(iso_counts,  file = file.path(out_dir, 'sodo_transcript_allele_counts.rds'))
-saveRDS(probs,       file = file.path(out_dir, 'sodo_gbrs_genoprobs_69K.rds'))
+saveRDS(gene_counts, file = file.path(out_dir, paste0('sodo_gene_allele_counts_', genome, '.rds')))
+saveRDS(iso_counts,  file = file.path(out_dir, paste0('sodo_transcript_allele_counts_', genome, '.rds')))
+saveRDS(probs,       file = file.path(out_dir, paste0('sodo_gbrs_genoprobs_69K_', genome, '.rds')))
 geno = as.data.frame(geno) %>% 
          rownames_to_column(var = 'ensembl')
-write_csv(geno, file = file.path(out_dir, 'sodo_gene_genotypes.csv'))
+write_csv(geno, file = file.path(out_dir, paste0('sodo_gene_genotypes_', genome, '.csv')))
 
 # Gather total gene counts.
 counts = apply(gene_counts, c(1, 3), sum, na.rm = TRUE)
 counts = as.data.frame(t(counts))
 counts = counts %>%
            rownames_to_column(var = 'ensembl')
-write_csv(counts, file = file.path(out_dir, 'sodo_gene_counts.csv'))
+
+# Write gene annotation.
+common_genes = intersect(names(annot), counts$ensembl)
+annot  = subset(annot,  names(annot)   %in% common_genes)
+counts = subset(counts, counts$ensembl %in% common_genes)
+annot  = as.data.frame(annot)
+annot  = annot[counts$ensembl,]
+annot  = select(annot, chr = seqnames, start, end, strand, gene_id, gene_name,                                            gene_biotype, symbol, entrezid)
+
+stopifnot(counts$ensembl == rownames(annot))
+
+if(genome == 'grcm38') {
+
+  write_csv(annot, file = file.path(out_dir, 'gene_annotation_ens98.csv'))
+
+} else {
+
+  write_csv(annot, file = file.path(out_dir, 'gene_annotation_ens105.csv'))
+
+} # else
+
+# Write gene counts.
+stopifnot(nrow(counts) > 0)
+write_csv(counts, file = file.path(out_dir, paste0('sodo_gene_counts_', genome, '.csv')))
 
 # Get VST normalized data.
 counts = data.frame(counts)
@@ -161,19 +209,12 @@ vst = assay(vst(dds))
 vst %>%
   as.data.frame() %>%
   rownames_to_column(var = 'ensembl') %>%
-  write_csv(file = file.path(out_dir, 'sodo_gene_counts_norm.csv'))
-
-# Write gene annotation.
-annot = subset(annot, names(annot) %in% rownames(vst))
-annot = as.data.frame(annot)
-annot = annot[rownames(vst),]
-annot = select(annot, chr = seqnames, start, end, strand, gene_id, gene_name,                           gene_biotype, symbol, entrezid)
-write_csv(annot, file = file.path(out_dir, 'gene_annotation_ens98.csv'))
+  write_csv(file = file.path(out_dir, paste0('sodo_gene_counts_norm_', genome, '.csv')))
 
 # Gather total transcript counts.
 counts = apply(iso_counts, c(1, 3), sum, na.rm = TRUE)
 counts = as.data.frame(t(counts))
 counts = counts %>%
            rownames_to_column(var = 'ensembl')
-write_csv(counts, file = file.path(out_dir, 'sodo_transcript_counts.csv'))
+write_csv(counts, file = file.path(out_dir, paste0('sodo_transcript_counts_', genome, '.csv')))
 

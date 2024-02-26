@@ -8,6 +8,9 @@
 
 ##### VARIABLES #####
 
+# Set the genome version.
+GENOME=grcm39
+
 # R container
 R=~/containers/bioconductor.sif
 
@@ -15,5 +18,5 @@ R=~/containers/bioconductor.sif
 
 module load singularity
 
-singularity exec ${R} Rscript --no-save 04_gather_gbrs_data.R
+singularity exec ${R} Rscript --no-save 04_gather_gbrs_data.R ${GENOME}
 

@@ -6,10 +6,14 @@
 #SBATCH --mem 180G # memory pool for all cores
 #SBATCH -t 0-4:00 # time (D-HH:MM)
 
-cd /projects/bolcun-filas-lab/DO_Superovulation/scripts/DO_superovulation
+GENOME=grcm39
+
+CONTAINER=~/containers/r_qtl2.sif
+
+RSCRIPT=/projects/bolcun-filas-lab/DO_Superovulation/scripts/DO_superovulation/haplotype_reconstruction.R
 
 module load singularity
 
-singularity exec ~/containers/r_qtl2.sif Rscript haplotype_reconstruction.R grcm39
+singularity exec ${CONTAINER} Rscript ${RSCRIPT} ${GENOME}
 
 

@@ -4,9 +4,11 @@
 #SBATCH --cpus-per-task=1 # number of cores
 #SBATCH --mem=8G # memory pool for all cores
 #SBATCH --time=3:00:00 # time (D-HH:MM)
-#SBATCH --array=1-209
+#SBATCH --array=1-2
 
-# 20804 genes
+# --array=1-220
+
+# 21929 genes
 
 ##### VARIABLES #####
 

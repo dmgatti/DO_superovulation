@@ -22,13 +22,13 @@ rankZ = function(x) {
 
 base_dir    = '/projects/bolcun-filas-lab/DO_Superovulation'
 data_dir    = file.path(base_dir, 'data')
-qtl2_file   = file.path(data_dir, 'superovulation_qtl2.Rdata')
-marker_dir  = '/projects/omics_share/mouse/GRCm38/supporting_files/muga_annotation/gigamuga'
-marker_file = file.path(marker_dir, 'gm_uwisc_v1.csv')
+qtl2_file   = file.path(data_dir, 'superovulation_qtl2_grcm39.Rdata')
+marker_dir  = '/projects/omics_share/mouse/GRCm39/supporting_files/muga_annotation/gigamuga'
+marker_file = file.path(marker_dir, 'gm_uwisc_v4.csv')
 
-# GBRS files say that they use Gencode M23, which corresponds to Ensembl 98.
-# https://www.gencodegenes.org/mouse/releases.html 
-ensembl_version = 98
+# GBRS files say that they use Ensembl 105.
+# https://github.com/TheJacksonLaboratory/cs-nf-pipelines/blob/main/config/gbrs.config 
+ensembl_release = 105
 
 markers = readr::read_csv(marker_file) %>%
             select(marker:bp_mm10) %>%
@@ -103,7 +103,7 @@ data = list(raw = as.matrix(pheno[,-1]),
 rownames(data$raw) = pheno$sample_id
 rownames(data$log) = pheno$sample_id
 
-lod_peaks = read_csv(file.path(base_dir, 'results', 'qtl2', 'sodo_qlt2_peaks.csv')) %>%
+lod_peaks = read_csv(file.path(base_dir, 'results', 'qtl2', 'sodo_qtl2_peaks.csv')) %>%
               select(lodcolumn:lod) %>%
               rename(data_name = lodcolumn) %>%
               mutate(marker_id = find_marker(map = map, chr = chr, pos = pos),
@@ -131,7 +131,7 @@ annot_samples = annot_samples[annot_samples$sample_id %in% colnames(norm_expr),]
 
 data = list(norm = t(norm_expr),
             rz   = apply(t(norm_expr), 2, rankZ))
-            
+
 lod_peaks = read_csv(file.path(base_dir, 'results', 'eqtl', 'sodo_max_eqtl_summary.csv')) %>%
               select(ensembl, qtl_chr:lod) %>%
               rename(gene_id   = ensembl) %>%

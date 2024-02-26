@@ -21,23 +21,16 @@ print(paste('START =', start, ' END =', end))
 
 base_dir    = '/projects/bolcun-filas-lab/DO_Superovulation'
 data_dir    = file.path(base_dir, 'data')
-results_dir = file.path(base_dir, 'results', 'eqtl')
+results_dir = file.path(base_dir, 'results', 'eqtl_grcm39')
 
 # This assumes that the 06_gather_qtl_data.R script has been run and that
-# 'superovulation_qtl2.Rdata' exists.
-data_file = file.path(data_dir, 'superovulation_qtl2.Rdata')
+# 'superovulation_qtl2_grcm39_120K.Rdata' exists.
+data_file = file.path(data_dir, 'superovulation_qtl2_grcm39_120K.Rdata')
 
 ##### MAIN #####
 
 # Read in data.
 load(data_file)
-
-# Get expression means and sds.
-rm = rowMeans(norm_expr)
-rs = apply(norm_expr, 1, sd)
-
-# Filter genes to retain those with means > 7 and sd > 0.
-norm_expr = norm_expr[rm > 7 & rs > 0,]
 
 # Keep the genes that we are mapping based on the start and end.
 end = min(end, nrow(norm_expr))

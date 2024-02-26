@@ -21,10 +21,12 @@
 SCRATCH_DIR=/fastscratch/dgatti
 
 # Genome build
-GENOME=GRCm38
+GENOME=grcm38
+#GENOME=grcm39
 
 # Ensembl version
 ENSEMBL=102
+#ENSEMBL=106
 
 # Output directory for STAR/RSEM index.
 GENOME_DIR=${SCRATCH_DIR}/${GENOME}_index/rsem_

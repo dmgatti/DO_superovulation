@@ -3,8 +3,9 @@
 #SBATCH --partition=dev
 #SBATCH --ntasks=1 # number of nodes
 #SBATCH --cpus-per-task=30 # number of cores
-#SBATCH --mem=32G # memory pool for all cores
-#SBATCH --time=08:00:00 # time (D-HH:MM)
+#SBATCH --mem=16G # memory pool for all cores
+#SBATCH --time=8:00:00 # time (D-HH:MM)
+#SBATCH --array=1-3
 
 ################################################################################
 # Perform quality control on FASTQ files using FastQC.
@@ -21,9 +22,7 @@
 BASE_DIR=/projects/bolcun-filas-lab/DO_Superovulation
 
 # Full path to the FASTQ file directories.
-FASTQ_DIR1=${BASE_DIR}/data/rnaseq/fastq/run1
-FASTQ_DIR2=${BASE_DIR}/data/rnaseq/fastq/run2
-FASTQ_DIR3=${BASE_DIR}/data/rnaseq/fastq/run3
+FASTQ_DIR=${BASE_DIR}/data/rnaseq/fastq/run${SLURM_ARRAY_TASK_ID}
 
 # Full path to the FastQC output directory.
 OUTPUT_DIR=${BASE_DIR}/results/fastqc
@@ -39,25 +38,14 @@ module load singularity
 mkdir -p ${BASE_DIR}/results/fastqc
 
 # Run FastQC on all fastq files.
-echo "Processing run1"
+echo "Processing run${SLURM_ARRAY_TASK_ID}"
 singularity exec ${FASTQC} fastqc \
                               --threads 30 \
                               --outdir ${OUTPUT_DIR} \
-                              ${FASTQ_DIR1}/*.gz
-
-echo "Processing run2"
-singularity exec ${FASTQC} fastqc \
-                              --threads 30 \
-                              --outdir ${OUTPUT_DIR} \
-                              ${FASTQ_DIR2}/*.gz
-
-echo "Processing run3"
-singularity exec ${FASTQC} fastqc \
-                              --threads 30 \
-                              --outdir ${OUTPUT_DIR} \
-                              ${FASTQ_DIR3}/*.gz
-                              
+                              ${FASTQ_DIR}/SO*.fastq.gz
 
 # Run MultiQC to summarize FastQC results.
-singularity exec ${MULTIQC} multiqc ${OUTPUT_DIR}
+singularity exec ${MULTIQC} multiqc --outdir ${OUTPUT_DIR} \
+                                    --filename multiqc_report${SLURM_ARRAY_TASK_ID}.html \
+                                    ${OUTPUT_DIR}
 
